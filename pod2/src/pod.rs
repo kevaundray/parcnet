@@ -1242,7 +1242,7 @@ mod tests {
         let entry7 = Entry::new_from_scalar("bar".to_string(), scalar2);
         let entry9 = Entry::new_from_scalar("claimed sum".to_string(), scalar3);
 
-        // three schnorr pods
+        // two schnorr pods
         let schnorr_pod1 = POD::execute_schnorr_gadget(
             &vec![entry1.clone(), entry2.clone()],
             &SchnorrSecretKey { sk: 25 },
@@ -1351,8 +1351,8 @@ mod tests {
                 operation_type: OperationType::GtFromEntries,
                 statement_1_parent: Some("p1".to_string()),
                 statement_1_name: Some("VALUEOF:banana".to_string()),
-                statement_2_parent: Some("p1".to_string()),
-                statement_2_name: Some("VALUEOF:apple".to_string()),
+                statement_2_parent: Some("_SELF".to_string()),
+                statement_2_name: Some("VALUEOF:p1-apple".to_string()),
                 statement_3_parent: None,
                 statement_3_name: None,
                 optional_entry: None,
@@ -1364,8 +1364,8 @@ mod tests {
                 operation_type: OperationType::ContainsFromEntries,
                 statement_1_parent: Some("_SELF".to_string()),
                 statement_1_name: Some("VALUEOF:schnorrPOD2-vec-entry".to_string()),
-                statement_2_parent: Some("p1".to_string()),
-                statement_2_name: Some("VALUEOF:apple".to_string()),
+                statement_2_parent: Some("_SELF".to_string()),
+                statement_2_name: Some("VALUEOF:p1-apple".to_string()),
                 statement_3_parent: None,
                 statement_3_name: None,
                 optional_entry: None,
@@ -2420,6 +2420,171 @@ mod tests {
         //          [local-sum [+ [pod? [local-value]] 42]]
         //          [overall-max [max local-sum
         //                            custom-sum]]]]
+
+        Ok(())
+    }
+
+    #[test]
+    fn i_know_someone_that_knows_someone() -> Result<(), Error> {
+        // Statement: I know Alice who knows Bob knows Charlie who knows Eve whose public key is signed by 0xVITALIK
+
+        let protocol = SchnorrSigner::new();
+
+        let me_sk = SchnorrSecretKey { sk: 24 };
+        let me_pk = protocol.keygen(&me_sk).pk;
+        let me_pk_entry = Entry::new_from_scalar("me-pk".to_string(), me_pk.clone());
+
+        let alice_sk = SchnorrSecretKey { sk: 25 };
+        let alice_pk = protocol.keygen(&alice_sk).pk;
+
+        let bob_sk = SchnorrSecretKey { sk: 26 };
+        let bob_pk = protocol.keygen(&bob_sk).pk;
+
+        let charlie_sk = SchnorrSecretKey { sk: 27 };
+        let charlie_pk = protocol.keygen(&charlie_sk).pk;
+
+        let eve_sk = SchnorrSecretKey { sk: 28 };
+        let eve_pk = protocol.keygen(&eve_sk).pk;
+
+        let vitalik_sk = SchnorrSecretKey { sk: 29 };
+        let vitalik_pk = protocol.keygen(&vitalik_sk).pk;
+
+        // Vitalik is the only known attestor here according to the statement
+        let known_attestors = vec![vitalik_pk];
+        let known_attestors_entry =
+            Entry::new_from_vec("known_attestors".to_string(), known_attestors.clone());
+
+        // In order to show that I know someone, I will sign over their public key
+        //
+        // Lets first create order-1 PODS for all of the connections
+        //
+        // First I sign over Alice's public key
+        let alice_user_entry = Entry::new_from_scalar("user".to_string(), alice_pk);
+        let me_alice = POD::execute_schnorr_gadget(&vec![alice_user_entry.clone()], &me_sk);
+        // Now Alice signs over Bob's public key
+        let bob_user_entry = Entry::new_from_scalar("user".to_string(), bob_pk);
+        let alice_bob = POD::execute_schnorr_gadget(&vec![bob_user_entry.clone()], &alice_sk);
+        // Now Bob signs over Charlie's public key
+        let charlie_user_entry = Entry::new_from_scalar("user".to_string(), charlie_pk);
+        let bob_charlie = POD::execute_schnorr_gadget(&vec![charlie_user_entry.clone()], &bob_sk);
+        // Now Charlie signs over Eve's public key
+        let eve_user_entry = Entry::new_from_scalar("user".to_string(), eve_pk);
+        let charlie_eve = POD::execute_schnorr_gadget(&vec![eve_user_entry.clone()], &charlie_sk);
+        // Now Vitalik signs over Eve's public key
+        let vitalik_eve = POD::execute_schnorr_gadget(&vec![eve_user_entry.clone()], &vitalik_sk);
+
+        let mut relation_input_pods = HashMap::new();
+        relation_input_pods.insert("me-alice".to_string(), me_alice.clone());
+        relation_input_pods.insert("alice-bob".to_string(), alice_bob.clone());
+        relation_input_pods.insert("bob-charlie".to_string(), bob_charlie.clone());
+        relation_input_pods.insert("charlie-eve".to_string(), charlie_eve.clone());
+        relation_input_pods.insert("vitalik-eve".to_string(), vitalik_eve.clone());
+
+        let relation_input = GPGInput::new(relation_input_pods, HashMap::new());
+
+        let cmds = vec![
+            // Create a new entry called known attestors
+            // which contains just vitalik
+            OperationCmd {
+                operation_type: OperationType::NewEntry,
+                statement_1_parent: None,
+                statement_1_name: None,
+                statement_2_parent: None,
+                statement_2_name: None,
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: Some(known_attestors_entry.clone()),
+                output_statement_name: "known_attestors".to_string(),
+            },
+            // Create a new entry with my public key
+            OperationCmd {
+                operation_type: OperationType::NewEntry,
+                statement_1_parent: None,
+                statement_1_name: None,
+                statement_2_parent: None,
+                statement_2_name: None,
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: Some(me_pk_entry.clone()),
+                output_statement_name: "me-pk".to_string(),
+            },
+            // Now check that my public key, does indeed match with the
+            // one that signed me-alice
+            OperationCmd {
+                operation_type: OperationType::EqualityFromEntries,
+                statement_1_parent: Some("me-alice".to_string()),
+                statement_1_name: Some("VALUEOF:_signer".to_string()),
+                statement_2_parent: Some("_SELF".to_string()),
+                statement_2_name: Some("VALUEOF:me-pk".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "I know alice".to_string(),
+            },
+            // Now we check that Alice knows Bob
+            OperationCmd {
+                operation_type: OperationType::EqualityFromEntries,
+                statement_1_parent: Some("alice-bob".to_string()),
+                statement_1_name: Some("VALUEOF:_signer".to_string()),
+                statement_2_parent: Some("me-alice".to_string()),
+                statement_2_name: Some("VALUEOF:user".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "alice knows bob".to_string(),
+            },
+            // Now we check that Bob knows Charlie
+            OperationCmd {
+                operation_type: OperationType::EqualityFromEntries,
+                statement_1_parent: Some("bob-charlie".to_string()),
+                statement_1_name: Some("VALUEOF:_signer".to_string()),
+                statement_2_parent: Some("alice-bob".to_string()),
+                statement_2_name: Some("VALUEOF:user".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "bob knows charlie".to_string(),
+            },
+            // Now we check that Charlie knows Eve
+            OperationCmd {
+                operation_type: OperationType::EqualityFromEntries,
+                statement_1_parent: Some("charlie-eve".to_string()),
+                statement_1_name: Some("VALUEOF:_signer".to_string()),
+                statement_2_parent: Some("bob-charlie".to_string()),
+                statement_2_name: Some("VALUEOF:user".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "charlie knows eve".to_string(),
+            },
+            // Now we check that the claimed Vitalik knows Eve
+            OperationCmd {
+                operation_type: OperationType::EqualityFromEntries,
+                statement_1_parent: Some("vitalik-eve".to_string()),
+                statement_1_name: Some("VALUEOF:user".to_string()),
+                statement_2_parent: Some("charlie-eve".to_string()),
+                statement_2_name: Some("VALUEOF:user".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "charlie knows eve".to_string(),
+            },
+            // Now we check that that was indeed Vitalik
+            OperationCmd {
+                operation_type: OperationType::ContainsFromEntries,
+                statement_1_parent: Some("_SELF".to_string()),
+                statement_1_name: Some("VALUEOF:known_attestors".to_string()),
+                statement_2_parent: Some("vitalik-eve".to_string()),
+                statement_2_name: Some("VALUEOF:_signer".to_string()),
+                statement_3_parent: None,
+                statement_3_name: None,
+                optional_entry: None,
+                output_statement_name: "Will the real Vitalik please stand up".to_string(),
+            },
+        ];
+
+        let relation_gadget = POD::execute_oracle_gadget(&relation_input, &cmds).unwrap();
+        assert!(relation_gadget.verify()? == true);
 
         Ok(())
     }
